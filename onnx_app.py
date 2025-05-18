@@ -14,7 +14,7 @@ import os
 from collections import defaultdict, Counter
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "https://isinbalbe3.mtacloud.co.il"}})
+CORS(app)
 
 
 # Configure logging
