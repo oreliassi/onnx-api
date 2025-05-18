@@ -13,19 +13,30 @@ from datetime import datetime
 import os
 from collections import defaultdict, Counter
 
-app = Flask(__name__)
-CORS(app)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+log_path = os.path.join(BASE_DIR, 'logs')
+os.makedirs(log_path, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filename=os.path.join(log_path, 'defect_detection.log')
+)
 
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+app = Flask(__name__)
+CORS(app)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Improved configuration
 CONFIG = {
     'CONFIDENCE_THRESHOLD': 0.4,  # Lower threshold for better detection
     'DEBUG_MODE': True,
-    'OUTPUT_DIR': 'detection_logs',
+    'OUTPUT_DIR': os.path.join(BASE_DIR, 'detection_logs'),
     'CACHE_ENABLED': True,
     'ADAPTIVE_MAPPING': True,
     'LEARNING_MODE': True
@@ -37,7 +48,8 @@ os.makedirs(CONFIG['OUTPUT_DIR'], exist_ok=True)
 # Load ONNX model
 try:
     logger.info("Loading ONNX model...")
-    session = ort.InferenceSession("best.onnx")
+    model_path = os.path.join(BASE_DIR, "best.onnx")
+    session = ort.InferenceSession(model_path)
     model_loaded = True
     logger.info("ONNX model loaded successfully!")
     
@@ -625,4 +637,4 @@ if __name__ == '__main__':
             for class_id, defect_type in saved_mappings.items():
                 mapper.update_mapping(class_id, defect_type)
     
-    app.run(debug=CONFIG['DEBUG_MODE'], host='0.0.0.0', port=5000)
+    app.run(debug=CONFIG['DEBUG_MODE'], host='0.0.0.0')
