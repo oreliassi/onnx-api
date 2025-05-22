@@ -13,28 +13,29 @@ from datetime import datetime
 import os
 from collections import defaultdict, Counter
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-log_path = os.path.join(BASE_DIR, 'logs')
-os.makedirs(log_path, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filename=os.path.join(log_path, 'defect_detection.log')
-)
-
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
 app = Flask(__name__)
 CORS(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Improved configuration
+# Setup logging
+log_path = os.path.join(BASE_DIR, 'logs')
+os.makedirs(log_path, exist_ok=True)
+
+# Configure logging to both file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(log_path, 'defect_detection.log')),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# CRITICAL: Lower thresholds for testing
 CONFIG = {
-    'CONFIDENCE_THRESHOLD': 0.4,  # Lower threshold for better detection
+    'CONFIDENCE_THRESHOLD': 0.1,  # Much lower for debugging
     'DEBUG_MODE': True,
     'OUTPUT_DIR': os.path.join(BASE_DIR, 'detection_logs'),
     'CACHE_ENABLED': True,
@@ -58,6 +59,7 @@ try:
     output_names = [output.name for output in session.get_outputs()]
     input_shape = session.get_inputs()[0].shape
     logger.info(f"Model input: {input_name}, shape: {input_shape}")
+    logger.info(f"Model outputs: {output_names}")
     
 except Exception as e:
     logger.error(f"Error loading ONNX model: {e}")
@@ -65,16 +67,15 @@ except Exception as e:
     model_loaded = False
 
 # Dynamic class mapping system
-# Enhanced class mapping system for server
 class AdaptiveClassMapper:
     def __init__(self):
         self.class_patterns = defaultdict(lambda: defaultdict(int))
         self.confirmed_mappings = {}
         self.learning_data = defaultdict(list)
         self.confidence_thresholds = {
-            'clean': 0.5,
-            'layer': 0.35,
-            'spaghetti': 0.35
+            'clean': 0.3,      # Lower thresholds for debugging
+            'layer': 0.2,
+            'spaghetti': 0.2
         }
         
     def observe_pattern(self, class_id, context):
@@ -96,11 +97,7 @@ class AdaptiveClassMapper:
         # Check confirmed mappings first
         if class_id_str in self.confirmed_mappings:
             mapping_type = self.confirmed_mappings[class_id_str]
-            # Apply confidence threshold based on type
-            if confidence and confidence < self.confidence_thresholds.get(mapping_type, 0.4):
-                # If confidence is too low, return 'clean' for safety
-                logger.info(f"Confidence {confidence} too low for {mapping_type} (threshold: {self.confidence_thresholds.get(mapping_type, 0.4)}), defaulting to clean")
-                return 'clean'
+            logger.info(f"Using confirmed mapping: Class {class_id} -> {mapping_type}")
             return mapping_type
         
         # Use pattern analysis for unknown IDs
@@ -111,23 +108,17 @@ class AdaptiveClassMapper:
         class_id_int = int(class_id)
         
         # Log for debugging
-        logger.info(f"Analyzing class ID {class_id_int} with confidence {confidence}")
+        logger.info(f"Analyzing unknown class ID {class_id_int} with confidence {confidence}")
         
         # UPDATED MAPPING BASED ON CONSOLE LOGS
-        # Class 8323 consistently appears as clean with high confidence
         if class_id_int == 8323:
             return 'clean'
-        # 8264, 8266, 8269, 8270 appear in spaghetti detections
         elif class_id_int in [8264, 8266, 8269, 8270]:
             return 'spaghetti'
-        # 4153, 4313, 4393, 4473 appear in layer shift detections
         elif class_id_int in [4153, 4313, 4393, 4473]:
             return 'layer'
-        # 6335 appears in spaghetti detections
         elif class_id_int in [6335]:
             return 'spaghetti'
-            
-        # Keep your original range-based mappings as fallbacks
         elif 4000 <= class_id_int < 5000:
             return 'layer'
         elif 6000 <= class_id_int < 7000:
@@ -138,11 +129,10 @@ class AdaptiveClassMapper:
             else:
                 return 'clean'
         
-        # Default case - use confidence to determine
-        if confidence < 0.33:
+        # Default fallback - use confidence to determine
+        if confidence and confidence < 0.2:
             return 'clean'
             
-        # Default fallback
         return 'clean'
     
     def update_mapping(self, class_id, defect_type):
@@ -176,7 +166,7 @@ class AdaptiveClassMapper:
 # Initialize the mapper
 mapper = AdaptiveClassMapper()
 
-# Pre-configure known mappings based on your observations
+# Pre-configure known mappings
 known_mappings = {
     # Clean detections
     "8323": "clean",
@@ -192,8 +182,7 @@ known_mappings = {
     "8322": "layer",
     "4633": "layer",
     "2713": "layer",
-    "4393": "layer", 
-    "4473": "layer",
+    "4393": "layer",
 
     # Spaghetti detections
     "8267": "spaghetti",
@@ -232,14 +221,11 @@ def health_check():
 @app.route('/detect', methods=['POST'])
 def detect():
     try:
+        logger.info("=== DETECTION REQUEST RECEIVED ===")
+        
         if not model_loaded:
-            logger.warning("Model not loaded")
-            return jsonify([{
-                'type': 'clean',
-                'confidence': 0.95,
-                'bbox': [0.5, 0.5, 0.5, 0.5],
-                'class_id': 'clean'
-            }])
+            logger.error("Model not loaded - returning error")
+            return jsonify({'error': 'Model not loaded'}), 500
         
         # Get image from request
         data = request.json
@@ -255,71 +241,91 @@ def detect():
         # Decode and preprocess image
         image_data = base64.b64decode(image_b64)
         image = Image.open(io.BytesIO(image_data))
+        logger.info(f"Image loaded: {image.size} mode: {image.mode}")
         
         # Enhanced preprocessing
         img_array = preprocess_image_enhanced(image)
+        logger.info(f"Preprocessed image shape: {img_array.shape}")
         
         # Run inference
+        logger.info("Running ONNX inference...")
         outputs = session.run(output_names, {input_name: img_array})
+        
+        # CRITICAL DEBUG LOGGING
+        logger.info(f"Raw ONNX output shape: {outputs[0].shape}")
+        logger.info(f"Raw ONNX output type: {type(outputs[0])}")
+        
+        # Log first few raw values
+        if len(outputs[0].shape) == 3 and len(outputs[0][0]) > 0:
+            sample_detection = outputs[0][0][0]
+            logger.info(f"First detection raw values: {sample_detection[:10]}")
+            
+            # Check if we have actual detections vs zeros
+            non_zero_count = np.count_nonzero(sample_detection)
+            logger.info(f"Non-zero values in first detection: {non_zero_count}/{len(sample_detection)}")
         
         # Process detections with adaptive mapping
         detections = process_detections_adaptive(outputs, image.size)
+        
+        logger.info(f"Final processed detections: {detections}")
+        logger.info("=== DETECTION REQUEST COMPLETED ===")
         
         return jsonify(detections)
     
     except Exception as e:
         logger.error(f"Error in detection: {e}", exc_info=True)
-        return jsonify([{
-            'type': 'clean',
-            'confidence': 0.7,
-            'bbox': [0.5, 0.5, 0.5, 0.5],
-            'class_id': 'clean'
-        }])
+        return jsonify({'error': str(e)}), 500
 
 def preprocess_image_enhanced(image, target_size=(640, 640)):
     """Enhanced image preprocessing for better detection"""
-    # Convert to RGB if needed
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
+    try:
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Create square image with padding
+        original_width, original_height = image.size
+        square_size = max(original_width, original_height)
+        
+        # Create padded square image
+        new_image = Image.new('RGB', (square_size, square_size), (114, 114, 114))
+        
+        # Center the original image
+        offset_x = (square_size - original_width) // 2
+        offset_y = (square_size - original_height) // 2
+        new_image.paste(image, (offset_x, offset_y))
+        
+        # Apply adaptive image enhancement
+        img_array = np.array(new_image)
+        
+        # Convert to OpenCV format
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        
+        # Apply CLAHE for better contrast
+        lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        l = clahe.apply(l)
+        enhanced = cv2.merge([l, a, b])
+        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+        
+        # Convert back to RGB
+        enhanced_rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
+        
+        # Resize to target size
+        resized = cv2.resize(enhanced_rgb, target_size, interpolation=cv2.INTER_LINEAR)
+        
+        # Normalize and prepare for model
+        img_array = resized.astype(np.float32) / 255.0
+        img_array = img_array.transpose(2, 0, 1)  # HWC to CHW
+        img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
+        
+        logger.info(f"Preprocessing completed successfully: {img_array.shape}")
+        return img_array
     
-    # Create square image with padding
-    original_width, original_height = image.size
-    square_size = max(original_width, original_height)
-    
-    # Create padded square image
-    new_image = Image.new('RGB', (square_size, square_size), (114, 114, 114))
-    
-    # Center the original image
-    offset_x = (square_size - original_width) // 2
-    offset_y = (square_size - original_height) // 2
-    new_image.paste(image, (offset_x, offset_y))
-    
-    # Apply adaptive image enhancement
-    img_array = np.array(new_image)
-    
-    # Convert to OpenCV format
-    img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    
-    # Apply CLAHE for better contrast
-    lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    l = clahe.apply(l)
-    enhanced = cv2.merge([l, a, b])
-    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-    
-    # Convert back to RGB
-    enhanced_rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
-    
-    # Resize to target size
-    resized = cv2.resize(enhanced_rgb, target_size, interpolation=cv2.INTER_LINEAR)
-    
-    # Normalize and prepare for model
-    img_array = resized.astype(np.float32) / 255.0
-    img_array = img_array.transpose(2, 0, 1)  # HWC to CHW
-    img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
-    
-    return img_array
+    except Exception as e:
+        logger.error(f"Error in preprocessing: {e}")
+        raise
 
 def process_detections_adaptive(outputs, original_size):
     """Process detections with adaptive class mapping"""
@@ -327,19 +333,26 @@ def process_detections_adaptive(outputs, original_size):
     
     try:
         output = outputs[0]
-        
-        # Log the output shape for debugging
-        logger.info(f"Detection output shape: {output.shape}")
+        logger.info(f"Processing detections - output shape: {output.shape}")
         
         # Handle different output formats
         if len(output.shape) == 3:
             # Format: [batch, num_detections, values]
-            num_processed = 0
+            num_detections = len(output[0])
+            logger.info(f"Total detections in output: {num_detections}")
+            
+            valid_detections = 0
             
             for i, detection in enumerate(output[0]):
+                # Basic detection format: [x, y, w, h, confidence, class_scores...]
+                if len(detection) < 5:
+                    logger.warning(f"Detection {i} has insufficient values: {len(detection)}")
+                    continue
+                
                 x, y, w, h = detection[0:4]
                 confidence = detection[4]
                 
+                # Get class scores
                 if len(detection) > 5:
                     class_scores = detection[5:]
                     class_id = np.argmax(class_scores)
@@ -347,6 +360,10 @@ def process_detections_adaptive(outputs, original_size):
                 else:
                     class_id = 0
                     class_score = 1.0
+                
+                # Log raw values for debugging
+                if i < 5:  # Only log first 5 detections to avoid spam
+                    logger.info(f"Detection {i}: bbox=[{x:.3f}, {y:.3f}, {w:.3f}, {h:.3f}], conf={confidence:.3f}, class_id={class_id}, class_score={class_score:.3f}")
                 
                 # Normalize confidence values if they're > 1
                 if confidence > 1.0:
@@ -356,17 +373,17 @@ def process_detections_adaptive(outputs, original_size):
                 
                 combined_confidence = confidence * class_score
                 
-                # Skip very low confidence detections early
-                if combined_confidence < CONFIG['CONFIDENCE_THRESHOLD'] / 2:
+                # CRITICAL: Much lower threshold for debugging
+                if combined_confidence < 0.05:  # Very low threshold
                     continue
-                    
-                num_processed += 1
+                
+                valid_detections += 1
                 
                 # Use adaptive mapping to determine defect type
                 defect_type = mapper.get_mapping(class_id, combined_confidence)
                 
                 # Log the mapping process
-                logger.info(f"Detection {i}: class_id={class_id}, confidence={combined_confidence:.3f}, mapped to: {defect_type}")
+                logger.info(f"Detection {i}: class_id={class_id}, combined_confidence={combined_confidence:.3f}, mapped to: {defect_type}")
                 
                 # Learn from this detection
                 if CONFIG['LEARNING_MODE']:
@@ -384,7 +401,9 @@ def process_detections_adaptive(outputs, original_size):
                         'class_id': int(class_id)
                     })
             
-            logger.info(f"Processed {num_processed} detections, found {len(detections)} above threshold")
+            logger.info(f"Valid detections found: {valid_detections}, above threshold: {len(detections)}")
+        else:
+            logger.error(f"Unexpected output shape: {output.shape}")
         
         # Sort by confidence
         detections.sort(key=lambda x: x['confidence'], reverse=True)
@@ -399,21 +418,17 @@ def process_detections_adaptive(outputs, original_size):
         # Convert back to list
         detections = list(type_groups.values())
         
-        # If no defects detected, add clean detection
+        # CRITICAL: Only return clean if NO real detections found
         if not detections:
-            logger.info("No detections above threshold, returning clean detection")
+            logger.warning("No detections above threshold found")
             detections = [{
                 'type': 'clean',
                 'confidence': 0.95,
                 'bbox': [0.5, 0.5, 0.1, 0.1],
                 'class_id': 0
             }]
-        # If only clean detections present, make sure confidence is high
-        elif all(d['type'] == 'clean' for d in detections):
-            # Boost clean confidence to avoid oscillation
-            for d in detections:
-                d['confidence'] = max(d['confidence'], 0.95)
         
+        logger.info(f"Final detections returned: {detections}")
         return detections
     
     except Exception as e:
@@ -477,7 +492,7 @@ def analyze_mappings():
                 combined_confidence = confidence * class_score
                 
                 # Only consider reasonably confident detections
-                if combined_confidence > 0.2:
+                if combined_confidence > 0.05:  # Lower threshold for analysis
                     # Keep track of class ID frequencies
                     class_id_str = str(class_id)
                     class_id_counts[class_id_str] = class_id_counts.get(class_id_str, 0) + 1
@@ -637,4 +652,5 @@ if __name__ == '__main__':
             for class_id, defect_type in saved_mappings.items():
                 mapper.update_mapping(class_id, defect_type)
     
-    app.run(debug=CONFIG['DEBUG_MODE'], host='0.0.0.0')
+    logger.info("Starting Flask application...")
+    app.run(debug=CONFIG['DEBUG_MODE'], host='0.0.0.0', port=5000)
