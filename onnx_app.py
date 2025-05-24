@@ -11,104 +11,104 @@ import json
 import logging
 from datetime import datetime
 import os
-import gc  # For garbage collection
+import gc
 from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)
 
-# Configure logging for production
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Reduced logging to save memory
+logging.basicConfig(
+    level=logging.WARNING,  # Changed from INFO to WARNING
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]  # Only console logging
+)
 logger = logging.getLogger(__name__)
 
-# Optimized configuration for low memory
+# Memory-optimized configuration
 CONFIG = {
-    'CONFIDENCE_THRESHOLD': 0.4,
-    'DEBUG_MODE': False,  # Disabled for production
-    'LEARNING_MODE': False,  # Disabled to save memory
-    'MAX_CACHE_SIZE': 10  # Limit cache size
+    'CONFIDENCE_THRESHOLD': 0.1,
+    'DEBUG_MODE': False,  # Disabled debug mode
+    'MAX_IMAGE_SIZE': 640,  # Limit image size
+    'BATCH_SIZE': 1,
+    'CACHE_ENABLED': False,  # Disabled caching to save memory
+    'ADAPTIVE_MAPPING': True,
+    'LEARNING_MODE': False  # Disabled learning mode
 }
 
-# Global variables
-session = None
-model_loaded = False
-input_name = None
-output_names = None
+# Load ONNX model with memory optimization
+try:
+    logger.warning("Loading ONNX model...")
+    model_path = os.path.join(BASE_DIR, "best.onnx")
+    
+    # Optimize ONNX runtime for memory
+    providers = ['CPUExecutionProvider']
+    session_options = ort.SessionOptions()
+    session_options.enable_mem_pattern = False  # Reduce memory usage
+    session_options.enable_cpu_mem_arena = False  # Disable memory arena
+    session_options.arena_extend_strategy = 'kSameAsRequested'
+    
+    session = ort.InferenceSession(
+        model_path, 
+        sess_options=session_options,
+        providers=providers
+    )
+    
+    model_loaded = True
+    input_name = session.get_inputs()[0].name
+    output_names = [output.name for output in session.get_outputs()]
+    logger.warning("ONNX model loaded successfully!")
+    
+except Exception as e:
+    logger.error(f"Error loading ONNX model: {e}")
+    session = None
+    model_loaded = False
 
-# Simplified class mapping (hardcoded to save memory)
-SIMPLE_CLASS_MAPPING = {
-    # Clean detections
-    8323: "clean",
-    8345: "clean",
-    
-    # Layer shift detections  
-    4153: "layer", 4313: "layer", 4393: "layer", 4473: "layer",
-    4233: "layer", 4553: "layer", 4633: "layer", 4713: "layer",
-    2713: "layer", 8322: "layer",
-    
-    # Spaghetti detections
-    8264: "spaghetti", 8266: "spaghetti", 8267: "spaghetti", 8269: "spaghetti", 8270: "spaghetti",
-    8263: "spaghetti", 8344: "spaghetti", 8347: "spaghetti", 8101: "spaghetti",
-    6335: "spaghetti", 6332: "spaghetti", 6334: "spaghetti", 6341: "spaghetti", 
-    6346: "spaghetti", 6356: "spaghetti", 6377: "spaghetti", 6378: "spaghetti"
-}
-
-def load_model():
-    """Load ONNX model with memory optimization"""
-    global session, model_loaded, input_name, output_names
-    
-    try:
-        logger.info("Loading ONNX model...")
+# Simplified class mapping system
+class SimpleClassMapper:
+    def __init__(self):
+        # Pre-defined mappings only - no learning to save memory
+        self.mappings = {
+            # Clean detections
+            "8323": "clean", "8345": "clean",
+            # Layer shift detections  
+            "4313": "layer", "4473": "layer", "4713": "layer", "4553": "layer",
+            "4233": "layer", "4153": "layer", "8322": "layer", "4633": "layer",
+            "2713": "layer", "4393": "layer",
+            # Spaghetti detections
+            "8267": "spaghetti", "8266": "spaghetti", "8270": "spaghetti",
+            "8344": "spaghetti", "8269": "spaghetti", "8347": "spaghetti",
+            "8264": "spaghetti", "8263": "spaghetti", "6341": "spaghetti",
+            "6378": "spaghetti", "6335": "spaghetti", "8101": "spaghetti",
+            "6346": "spaghetti", "6332": "spaghetti", "6334": "spaghetti",
+            "6377": "spaghetti", "6356": "spaghetti"
+        }
         
-        # Configure ONNX Runtime for low memory usage
-        sess_options = ort.SessionOptions()
-        sess_options.enable_mem_pattern = False  # Disable memory pattern optimization
-        sess_options.enable_cpu_mem_arena = False  # Disable memory arena
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    def get_mapping(self, class_id, confidence=None):
+        class_id_str = str(class_id)
         
-        # Load with providers priority (CPU only for stability)
-        providers = ['CPUExecutionProvider']
+        if class_id_str in self.mappings:
+            return self.mappings[class_id_str]
         
-        session = ort.InferenceSession("best.onnx", sess_options, providers=providers)
-        model_loaded = True
-        
-        # Get model metadata
-        input_name = session.get_inputs()[0].name
-        output_names = [output.name for output in session.get_outputs()]
-        
-        logger.info("ONNX model loaded successfully")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error loading ONNX model: {e}")
-        session = None
-        model_loaded = False
-        return False
-
-def get_defect_type(class_id, confidence):
-    """Simple mapping function"""
-    class_id = int(class_id)
-    
-    # Check direct mappings first
-    if class_id in SIMPLE_CLASS_MAPPING:
-        return SIMPLE_CLASS_MAPPING[class_id]
-    
-    # Range-based fallbacks
-    if 4000 <= class_id < 5000:
-        return 'layer'
-    elif 6000 <= class_id < 7000:
-        return 'spaghetti'
-    elif 8000 <= class_id < 8350:
-        if 8260 <= class_id < 8300:
+        # Simple fallback logic
+        class_id_int = int(class_id)
+        if 4000 <= class_id_int < 5000:
+            return 'layer'
+        elif 6000 <= class_id_int < 7000:
             return 'spaghetti'
+        elif 8000 <= class_id_int < 8350:
+            if 8260 <= class_id_int < 8300:
+                return 'spaghetti'
+            return 'clean'
         return 'clean'
-    
-    # Low confidence default
-    return 'clean' if confidence < 0.4 else 'clean'
+
+# Initialize simplified mapper
+mapper = SimpleClassMapper()
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Lightweight health check"""
     return jsonify({
         'status': 'healthy',
         'model_loaded': model_loaded,
@@ -117,103 +117,97 @@ def health_check():
 
 @app.route('/detect', methods=['POST'])
 def detect():
-    """Optimized detection endpoint"""
     try:
         if not model_loaded:
-            return jsonify([{
-                'type': 'clean',
-                'confidence': 0.95,
-                'bbox': [0.5, 0.5, 0.5, 0.5],
-                'class_id': 0
-            }])
+            return jsonify({'error': 'Model not loaded'}), 500
         
-        # Get image data
         data = request.json
         if not data or 'image' not in data:
             raise ValueError("No image data provided")
         
         image_b64 = data['image']
         
-        # Remove data URL prefix
+        # Remove data URL prefix if present
         if 'data:image' in image_b64:
             image_b64 = re.sub('^data:image/.+;base64,', '', image_b64)
         
-        # Process image with memory management
-        detections = process_image_optimized(image_b64)
+        # Decode and preprocess image with memory optimization
+        image_data = base64.b64decode(image_b64)
+        image = Image.open(io.BytesIO(image_data))
         
-        # Force garbage collection
+        # Limit image size to reduce memory usage
+        max_size = CONFIG['MAX_IMAGE_SIZE']
+        if image.width > max_size or image.height > max_size:
+            image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        
+        # Process image
+        img_array = preprocess_image_optimized(image)
+        
+        # Run inference
+        outputs = session.run(output_names, {input_name: img_array})
+        
+        # Process detections
+        detections = process_detections_optimized(outputs)
+        
+        # Clean up memory
+        del img_array, outputs, image, image_data
         gc.collect()
         
         return jsonify(detections)
     
     except Exception as e:
-        logger.error(f"Detection error: {e}")
+        logger.error(f"Error in detection: {e}")
+        # Clean up memory on error
         gc.collect()
-        return jsonify([{
-            'type': 'clean',
-            'confidence': 0.7,
-            'bbox': [0.5, 0.5, 0.5, 0.5],
-            'class_id': 0
-        }])
+        return jsonify({'error': str(e)}), 500
 
-def process_image_optimized(image_b64):
-    """Memory-optimized image processing"""
+def preprocess_image_optimized(image, target_size=(640, 640)):
+    """Memory-optimized image preprocessing"""
     try:
-        # Decode image
-        image_data = base64.b64decode(image_b64)
-        image = Image.open(io.BytesIO(image_data))
-        
         # Convert to RGB if needed
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        # Resize directly to target size (skip padding for memory savings)
-        target_size = (640, 640)
-        image = image.resize(target_size, Image.Resampling.LANCZOS)
+        # Simple resize without padding to save memory
+        resized = image.resize(target_size, Image.Resampling.LANCZOS)
         
         # Convert to numpy array
-        img_array = np.array(image, dtype=np.float32) / 255.0
-        img_array = img_array.transpose(2, 0, 1)  # HWC to CHW
-        img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
+        img_array = np.array(resized, dtype=np.float32)
         
-        # Clean up PIL image
-        image.close()
-        del image
+        # Normalize
+        img_array = img_array / 255.0
         
-        # Run inference
-        outputs = session.run(output_names, {input_name: img_array})
+        # Transpose and add batch dimension
+        img_array = img_array.transpose(2, 0, 1)
+        img_array = np.expand_dims(img_array, axis=0)
         
-        # Clean up input array
-        del img_array
-        
-        # Process results
-        detections = process_detections_simple(outputs[0])
-        
-        # Clean up outputs
-        del outputs
-        
-        return detections
-        
+        return img_array
+    
     except Exception as e:
-        logger.error(f"Image processing error: {e}")
-        return [{
-            'type': 'clean',
-            'confidence': 0.8,
-            'bbox': [0.5, 0.5, 0.1, 0.1],
-            'class_id': 0
-        }]
+        logger.error(f"Error in preprocessing: {e}")
+        raise
 
-def process_detections_simple(output):
-    """Simplified detection processing"""
+def process_detections_optimized(outputs):
+    """Memory-optimized detection processing"""
     detections = []
     
     try:
+        output = outputs[0]
+        
         if len(output.shape) == 3:
-            # Process only top detections to save memory
-            for i, detection in enumerate(output[0][:100]):  # Limit to first 100
+            # Process only first N detections to save memory
+            max_detections = min(100, len(output[0]))
+            
+            for i in range(max_detections):
+                detection = output[0][i]
+                
+                if len(detection) < 5:
+                    continue
+                
                 x, y, w, h = detection[0:4]
                 confidence = detection[4]
                 
+                # Get class scores
                 if len(detection) > 5:
                     class_scores = detection[5:]
                     class_id = np.argmax(class_scores)
@@ -222,7 +216,7 @@ def process_detections_simple(output):
                     class_id = 0
                     class_score = 1.0
                 
-                # Normalize confidence
+                # Normalize confidence values
                 if confidence > 1.0:
                     confidence = confidence / 100.0
                 if class_score > 1.0:
@@ -230,12 +224,11 @@ def process_detections_simple(output):
                 
                 combined_confidence = confidence * class_score
                 
-                # Skip low confidence early
                 if combined_confidence < CONFIG['CONFIDENCE_THRESHOLD']:
                     continue
                 
                 # Get defect type
-                defect_type = get_defect_type(class_id, combined_confidence)
+                defect_type = mapper.get_mapping(class_id, combined_confidence)
                 
                 detections.append({
                     'type': defect_type,
@@ -244,31 +237,27 @@ def process_detections_simple(output):
                     'class_id': int(class_id)
                 })
         
-        # Sort by confidence and take best per type
-        detections.sort(key=lambda x: x['confidence'], reverse=True)
-        
-        # Group by type (keep only highest confidence per type)
+        # Keep only best detection per type
         type_groups = {}
         for det in detections:
             det_type = det['type']
-            if det_type not in type_groups:
+            if det_type not in type_groups or det['confidence'] > type_groups[det_type]['confidence']:
                 type_groups[det_type] = det
         
-        result = list(type_groups.values())
+        detections = list(type_groups.values())
         
-        # Default to clean if no detections
-        if not result:
-            result = [{
+        if not detections:
+            detections = [{
                 'type': 'clean',
                 'confidence': 0.95,
                 'bbox': [0.5, 0.5, 0.1, 0.1],
                 'class_id': 0
             }]
         
-        return result
-        
+        return detections
+    
     except Exception as e:
-        logger.error(f"Detection processing error: {e}")
+        logger.error(f"Error processing detections: {e}")
         return [{
             'type': 'clean',
             'confidence': 0.8,
@@ -276,26 +265,8 @@ def process_detections_simple(output):
             'class_id': 0
         }]
 
-# Simplified endpoints for memory efficiency
-@app.route('/test_detection', methods=['POST'])
-def test_detection():
-    """Simplified test endpoint"""
-    try:
-        data = request.json
-        detections = process_image_optimized(data['image'])
-        return jsonify({
-            'total_detections': len(detections),
-            'detections': detections
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+# Remove memory-intensive endpoints to save memory
+# Keeping only essential endpoints
 
 if __name__ == '__main__':
-    # Load model on startup
-    if not load_model():
-        logger.error("Failed to load model, exiting")
-        exit(1)
-    
-    # Run with optimized settings
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    app.run(debug=False, host='0.0.0.0', port=5000)
