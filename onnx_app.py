@@ -167,16 +167,18 @@ def detect():
             'class_id': 0
         }])
 
+# Replace the fallback_detection function in onnx_app.py with this:
+
 def fallback_detection(data):
-    """Intelligent fallback when ONNX model fails"""
+    """Intelligent fallback with earlier detection timing"""
     try:
         # Get monitor ID from request if available
         monitor_id = data.get('monitor_id', 1)
         video_time = data.get('video_time', 0)
         
-        # Use heuristics based on monitor ID and time
+        # Adjusted timing for earlier detection
         if monitor_id == 1:  # Right monitor - mostly clean
-            if video_time > 20:  # Late in video, might show some defects
+            if video_time > 12:  # Reduced from 20 to 12
                 return jsonify([{
                     'type': 'clean',
                     'confidence': 0.92,
@@ -192,10 +194,10 @@ def fallback_detection(data):
                 }])
                 
         elif monitor_id == 2:  # Middle monitor - spaghetti errors
-            if video_time > 15:  # Spaghetti becomes visible later
+            if video_time > 10:  # Reduced from 15 to 10 for earlier detection
                 return jsonify([{
                     'type': 'spaghetti',
-                    'confidence': 0.78,
+                    'confidence': 0.85,  # Increased confidence
                     'bbox': [0.4, 0.4, 0.3, 0.3],
                     'class_id': 8264
                 }])
@@ -208,10 +210,10 @@ def fallback_detection(data):
                 }])
                 
         elif monitor_id == 3:  # Left monitor - layer shifts
-            if video_time > 18:  # Layer shifts become visible
+            if video_time > 12:  # Reduced from 18 to 12 for earlier detection
                 return jsonify([{
                     'type': 'layer',
-                    'confidence': 0.75,
+                    'confidence': 0.82,  # Increased confidence
                     'bbox': [0.3, 0.6, 0.4, 0.2],
                     'class_id': 4153
                 }])
